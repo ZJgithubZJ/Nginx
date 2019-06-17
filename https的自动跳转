@@ -1,0 +1,69 @@
+这里由于www.xx5.com总是被黑，考虑升级http到https，证书使用的是腾讯云一年免费，且这里的申请必须指定子域。
+这里需要nginx有ssl模块，最初不是我搭建的，但我想他是有的吧！
+
+nginx的配置文件部分：
+server {
+                listen  443;                #这里端口改为443
+                server_name     www.xx5.comxx5.com;
+                index           default.html index.html index.php;
+                autoindex off;
+                limit_rate      512k;
+                access_log      /var/logs/www.xx5.com.log gzip;
+                ssl on;                                                                                                        #添加ssl配置
+                ssl_certificate /etc/nginx/ssl/Nginx/1_www.xx5.com_bundle.crt;             #一对钥匙的路径
+                ssl_certificate_key /etc/nginx/ssl/Nginx/2_www.xx5.com.key;
+                ssl_session_timeout 5m;
+                ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+                ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:HIGH:!aNULL:!MD5:!RC4:!DHE;
+                ssl_prefer_server_ciphers on;                                                                                            #一直到这里
+                if ($request_uri ~ '/bbs/*'){
+                   set $flag 1;
+                }
+                if ($request_uri ~ '/bbs/admincp.php'){
+                   set $flag 0;
+                }
+                root       /app/nginx/wwwroot/xx5/www.xx5.com/wwwroot;
+                rewrite ^(.*)news_list-([0-24-9]+)-?([0-9]*)\.html$ $1/index.php?a=news_list&type=$2&page=$3;
+                rewrite ^(.*)news_list-3-([0-9]+)\.html$ $1/index.php?a=news_list&type=3&e=$2;
+                rewrite ^(.*)news-([0-9]+)-([0-9]+)\.html$ $1/index.php?a=news&type=$2&id=$3;
+                rewrite ^(.*)player_list-([0-9]+)-?([0-9]*)\.html$ $1/index.php?a=player_list&type=$2&page=$3;
+                rewrite ^(.*)players-([0-9]+)-([0-9]+)-?([0-9]*)\.html$ $1/index.php?a=players&type=$2&u=$3&page=$4;
+                rewrite ^(.*)wallpaper_list-([0-9]+)\.html$ $1/index.php?a=wallpaper_list&page=$2;
+                rewrite ^(.*)video_list-([0-9]+)\.html$ $1/index.php?a=video_list&page=$2;
+                rewrite ^(.*)video-([0-9]+)\.html$ $1/index.php?a=video&id=$2;
+                rewrite ^(.*)faces_list-([0-9]+)\.html$ $1/index.php?a=faces_list&page=$2;
+                rewrite ^(.*)guide/guide_page-([a-zA-Z_]+)-([0-9]+)\.html$ $1/guide/index.php?a=guide_page&name=$2&type=$3;
+                rewrite ^(.*)diypage-([a-zA-Z_0-9]+)-?([0-9]*)\.html$ $1/index.php?a=diypage&name=$2&type=$3;
+                rewrite ^(.*)common-([a-zA-Z_]+)-?([0-9]*)-?([0-9]*)\.html$ $1/index.php?c=common&a=$2&type=$3&id=$4;
+                rewrite ^(.*)week_recommend\.html$ $1/index.php?a=week_recommend;
+
+好，以上就是https所需要添加的额外配置了（加粗部分）！
+这里nginx执行reload之后，就能够通过https://www.xx5.com了，嗯，好像很顺利！
+但是你忘了，源代码中所配置的域名，全部都是http协议的，并且这里如果再接着使用http的话，是会报403的！
+所以，不知道的玩家就会出现403的情况，这里为什么想不到要做一个强制跳转呢？？？？
+
+强制跳转：
+你会想到使用rewrite，那么具体怎么比编辑配置文件？
+直接在上面的ssl配置文件中添加一条rewrite规则？那端口用80？443？
+你会发现都不得行！
+经大佬指导后，明白需要重新配置一条server规则，同样的域名，监听80端口，并且把所有的请求都rewrite到https的相同URL
+
+配置如下：
+server {
+           listen 80;
+           server_name www.xx5.comxx5.com;
+           rewrite ^(.*)$ https://${server_name}$1 permanent;
+        }
+不需要指定默认主页，也不需要指定根目录，直接rewrite就好了，同时这里的 ${server_name}在老版的nginx中可以用$host代替！
+一样的！
+
+reload nginx之后，我们尝试访问http的地址！
+你会发现这里自动跳转到https了！
+这样不就很完善了嘛~
+
+
+
+
+
+坚持不懈！
+2019/5/7 16:47

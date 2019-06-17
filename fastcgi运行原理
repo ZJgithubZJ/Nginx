@@ -1,0 +1,187 @@
+Nginx + FCGI运行原理  
+	Nginx 不支持对外部程序的直接调用或者解析，所有的外部程序（包括PHP）必须通过FCGI接口来调用。FCGI接口在linux是socket（这个socket是文件socket，也可以是ip socket）。为了调用CGI程序，还需要一个FCGI的wrapper（wrapper可以理解为启动另一个程序的程序）。这个wrapper绑定在某个固定的socket上，如端口或者文件的socket，当Nginx将cgi请求发送给这个socket的时候，通过FCGI接口，wrapper接收到请求，然后派生出一个新的线程，这个线程调用解释器或者外部程序处理脚本并读取数据，接着，wrapper将返回的数据通过FCGi接口，沿着固定的socket传给Nginx，最终，NGinx将返回的数据发送给客户端，这就是Nginx+FCGi的运行流程。如图所示：
+spawn-fcgi 和 php-fpm
+  FCGI接口方式在脚本解析服务器上启动一个或者多个守护进程对动态脚本进行解析，这些进程就是FastCGI进程管理器，或者称为fastCgi引擎，spawn-fcgi 和 PHP-FPM就是支持php的两个Fcgi进程管理器。
+  span-fcgi是HTTP服务器lighttpd的一部分，目前是独立的一个项目，一般与lighttpd配合使用来支持PHP，但是lighttpd的spwan-fcgi在高并发访问的时候，会出现内存泄漏甚至自动重启FastCGI的问题
+  Nginx是个轻量级的HTTPserver，必须借助第三方的FCGI处理器才可以对PHP进行解析。
+  PHP-FPM是一个第三方的FCGI进程管理器，它是PHP的一个补丁来开发的，在安装的时候也需要和PHP源码一起编译，也就是说PHP-FPM被编译到PHP内核中，因此处理性能方面更加优秀，同事PHP-FPM在处理高并发方面也比spawn-fcgi引擎好很多，所以推荐NGINX+PHP-FPM组合。
+  FCGI的主要优点是把动态语言和HTTP server分离开来，所以Nginx 与 php、php-fpm经常被部署在不同的服务器上，以分担前端Nginx的服务器压力，让nginx 专一处理静态请求和转发动态请求。而PHP、PHP-fpm服务器专一解析PHP动态请求。
+
+下面就来部署他们：
+php下载地址： http://php.net
+php-fpm下载地址： http://php-fpm.org/downloads/
+这里下载的php是php5.3.3
+[root@zj Desktop]# php -v
+PHP 5.3.3 (cli) (built: Mar 22 2017 12:27:09)
+Copyright (c) 1997-2010 The PHP Group
+Zend Engine v2.3.0, Copyright (c) 1998-2010 Zend Technologies
+安装之前，先把依赖包装好：
+yum -y install gcc gcc++ libxml2 libxml2-devel autoconf libjpeg libjpeg-devel libpng libpng-devel freetype freetype-devel zlib zlib-devel glibc-devel glib2 glib2-devel
+这里是网上总结的依赖包，其实本人在虚拟机中并没有安装这么多依赖包，只是nginx需要的那些和php、php-fpm。nginx需要哪些？？？？草拟吗！
+yum -y install gcc pcre-devel openssl-devel
+且本人是用yum直接安装，网上是源码编译的。
+安装完成后，就要配置php以及php-fpm。
+php的配置文件，没动：
+[root@zj Desktop]# rpm -ql php
+/etc/httpd/conf.d/php.conf
+/usr/lib64/httpd/modules/libphp5.so
+/var/lib/php/session
+/var/www/icons/php.gif
+
+主要看一哈php-fpm的配置：
+php-fpm配置文件也在/etc/php-fpm.d下面，默认情况下会把/etc/php-fpm.d/www.conf 的配置文件include进去。
+
+我们在www.conf里面看看以下几项:
+listen = 127.0.0.1:9000 #监听了本地9k端口
+user = nginx #运行用户，本人在机器上用的是nobody，并且，不能为root，会报错。
+group = nginx  
+pm.max_children = 50 # 设置fcgi的进程数，官方建议小于2G内存开启64个，4G可以开200个
+request_terminate_timeout = 0 # 用于设置FCGI执行脚本的时间，默认是0秒，也就是五险的执行下去，可以更加情况改
+rlimit_files = 1024 #设置PHP-FPM 打开文件描述符的限制，这个值要和linux内核打开文件数关联起来，例如，要将此值设置为65535，就必须在linux命令上执行ulimit -HSN 65536
+pm.max_requests = 500 设置处理多少个请求后便会关闭，默认是500，
+listen.allowed_clients = 127.0.0.1 # 设置允许访问FCGI进程解析器的IP地址，如果不在IP地址，将无法接受Nginx转发过来的php解析请求。
+
+配置完上述字段后，就可以启动fastcgi了，这里是yum安装的。直接 service php-fpm start
+如果有像这样的报错：
+[root@salt php]# php-cgi
+PHP Warning: PHP Startup: Unable to load dynamic library '/usr/lib64/php/modules/redis.so' - /usr/lib64/php/modules/redis.so: undefined symbol: igbinary_unserialize in Unknown on line 0
+那么在/etc/php.ini把这行注释掉启动就可以了：
+; extension=/usr/lib64/php/modules/redis.so
+
+php配置好了，下面就是nginx了：
+
+找到nginx的配置文件，在server段添加字段：
+网上的截图：
+server {
+listen 80;
+server_name web1.test.com;
+charset utf8;
+location / {
+root /var/www/html;
+index index.html index.htm;
+}
+error_page 404 /404.html;
+error_page 500 502 503 504 /50x.html;
+location = /50x.html {
+root /usr/share/nginx/html;
+}
+location ~ \.php$ {
+root html;
+fastcgi_pass 127.0.0.1:9000;
+fastcgi_index index.php;
+fastcgi_param SCRIPT_FILENAME /var/www/html/$fastcgi_script_name;;
+include fastcgi_params;
+}
+}
+
+本人的配置截图：
+    server {
+        listen    80;
+        charset   utf-8;
+        server_name  zj.lala.com;
+        root    /usr/local/lala/;
+        index   index.php;
+        #rewrite ^/(.*) http://zj.test.com last;
+
+        location ~ \.php$ {
+                              #fastcgi_pass   127.0.0.1:9000;
+                              fastcgi_index  index.php;
+                              fastcgi_param  SCRIPT_FILENAME  /usr/local/lala/$fastcgi_script_name;
+                              include        fastcgi_params;
+        }
+        location ~ \.xml$ {
+                         fastcgi_pass   127.0.0.1:9000;
+                         fastcgi_index  index.php;
+                         include        fastcgi_params;
+        }
+        location ~* ^.+\.(jpg|jpeg|gif|css|js|xml|swf) {
+                          expires         max;
+
+        }
+    }
+
+基本上没有差别哦！
+我从线上环境cp了一套代码过来，域名也配了，但就是访问不了，但index.php是OK的，也就是说，php的配置是ok的，而且，代码里的xml文件，能够直接从浏览器中打开，so ， what  that  mean？？？
+
+
+基本 的配置ok了，下面来看看php的调优：
+我们在nginx的配置文件里面其实还能再添加好一大段内容：
+fastcgi_connect_timeout 300;
+fastcgi_send_timeout 300;
+fastcgi_read_timeout 300;
+fastcgi_buffer_size 64k;
+fastcgi_buffers 4 64k;
+fastcgi_busy_buffers_size 128k;
+fastcgi_temp_file_write_size 128k;
+fastcgi_cache_valid 200 302 1h;
+fastcgi_cache_valid 301 1d;
+fastcgi_cache_valid any 1m;
+	* 
+fastcgi_connect_timeout 300;` 值连接到后端FastCGI的超时时间
+	* 
+fastcgi_send_timeout 300; 指向Fastcgi 传送请求的超时时间，这个值是已经完成了2次握手后向FastCGI应答的超时时间
+	* 
+fastcgi_read_timeout 300; 指向接收FastCGI应答的超时时间，这个是已经完成2次握手后接收FastCGI应答的超时时间
+	* 
+fastcgi_buffer_size 64k; 用于指定读取FastCGI。 应答第一部分需要多大的缓冲区，这个值表示将使用1个64KB的缓冲区读取应答的第一部分（应答头），可以设置Fastcgi_buffers选项指定的缓冲区大小。
+	* 
+fastcgi_buffers 4 64k; 指定本地需要多少和多大的缓冲区缓冲FastCGI的应答请求。如果一个PHP脚本所产生的页面大小为256KB，那么就会为其分配4个64KB的缓冲区来缓存，如果页面大小大于256KB，那么大于256KB的部分会缓存到Fastcgi_temp指定的路径中。但是这个不是好办法。因为内存中的数据处理速度大于硬盘，一般这个值应该为站点中的php脚本所产生的页面大小的中间值，如果站点大部分脚本所产生的页面大小为256KB，那么可以把这个值设置为16 16K，或者4 64KB。。
+	* 
+fastcgi_busy_buffers_size 128k; 默认值是fastcgi_buffers的两 倍
+	* 
+fastcgi_temp_file_write_size 128k; 表示写入缓存文件时使用多大的数据块，默认是fastcgi_buffers的两倍。
+	* 
+开启缓存后：
+fastcgi_cache_valid 200 302 1h;将http状态码是200的和302的缓存一小时，301的缓存一天，其他的缓存一分钟
+	* 
+fastcgi_cache_valid 301 1d;
+	* 
+fastcgi_cache_valid any 1m;
+
+
+写完以上参数，保存退出并重启服务，即可！
+我那边，手动创建了一个index.php文件：
+[root@zj lala]# cat index.php
+<?php
+  phpinfo();
+?>
+
+访问是OK的！
+
+
+网上还有段代码，带有字段解释的代码：
+
+	1. 
+server {
+	2. 
+    listen 8011;
+	3. 
+    server_name test.cn;
+	4. 
+    location ~ \.php?.*$ {
+	5. 
+        root /share/test;
+	6. 
+        fastcgi_pass 127.0.0.1:9000;
+	7. 
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+	8. 
+        include fastcgi_params;
+	9. 
+    }
+	10. 
+}
+
+
+1、第一个大括号 server{ }：不必多说，代表一个独立的server，
+2、listen  8011：代表该server监听8011端口 
+3、location ~ \.php?.*${ }：代表一个能匹配对应uri的location，用于匹配一类uri，并对所匹配的uri请求做自定义的逻辑、配置。这里的location，匹配了所有带.php的uri请求，例如：http://192.168.244.128:8011/test.php/asdasdhttp://192.168.244.128:8011/index.php等
+4、root  /share/test：请求资源根目录，告诉匹配到该location下的uri到/share/teset文件夹下去寻找同名资源。
+5、fastcgi_pass  127.0.0.1:9000：这行开始是本文的重点：这行代码的意思是，将进入到该location内的uri请求看做是cgi程序，并将请求发送到9000端口，交由php-fpm处理。
+6、fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;  ：动态添加了一行fastcgi配置，配置内容为SCRIPT_FILENAME，我告知管理进程，cgi脚本名称。由于我的nginx中只有fastcgi_params文件，没有fastcgi.conf文件，所以要使php-fpm知道SCRIPT_FILENAME的具体值，就必须要动态的添加这行配置。 
+7、include fastcgi_params; 引入fastcgi配置文件
+以上就是最简洁版的nginx启动php脚本的最简配置，当重启nginx之后，在/share/test目录下创建一个xx.php文件，输入<?php  echo "hello world"; ?>保存，然后在浏览器中访问localhost:8011/xx.php 就可以在网页上显示hello world了。
+  
+
+坚持不懈！
+2018/11/16 17:37
